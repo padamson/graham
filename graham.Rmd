@@ -1,0 +1,280 @@
+---
+title: "Graham Screener"
+author: "Paul Adamson"
+date: "January 23, 2016"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(XML)
+require(quantmod)
+options("getSymbols.warning4.0"=FALSE)
+require(xtable)
+require(dplyr)
+require(stringr)
+```
+
+```{r screen, echo = F}
+
+NumberOfStocksInScreen <- function(url1=character(), url2=character()){
+  ## read first table from page
+  numstk <- readHTMLTable(paste0(url1,1,url2), which=1, header=F,
+                          stringsAsFactors=F,as.data.frame = T)
+  
+  ## total number of tickers returned from the screen and the particular
+  ## tickers contained in the table is contained in first element of first 
+  ## table. Ex: "Stock Screener Search Results (Showing 1 to 20 of 261)"
+  ## We want just the integers from this element.
+  
+  ## Take first element of first column
+  numstk <- numstk[1,1]
+  ## split string at non-digits
+  numstk <- strsplit(numstk, "[^[:digit:]]")
+  ## convert strings to numeric ("" become NA)
+  numstk <- as.numeric(unlist(numstk))
+  ## remove NA
+  numstk <- numstk[!is.na(numstk)]
+  
+  return(numstk[3])
+}
+
+StockScreenTickerList<- function(i=integer(),
+                                 url1=character(),
+                                 url2=character()) {
+  ## read second table from page
+  tickers <- readHTMLTable(paste0(url1,i,url2), header=F, which=2,
+                          stringsAsFactors=F,as.data.frame = T)
+  
+  ## Stock tickers are in the first column 
+  tickers <- tickers[,1]
+  ## First ticker is at index 3
+  firstTicker<-3
+  ## Last ticker is at next to last index
+  lastTicker<-length(tickers)-1
+  tickers<-tickers[firstTicker:lastTicker]
+  
+  # remove Toronto exchange tickers
+  tickers <- tickers[grep(".TO",tickers,invert = T)] 
+
+  return(tickers)
+}
+
+StockScreenTickers <- function(numberOfTickers=integer(),
+                               url1=character(),
+                               url2=character()) {
+  maxTickersInTable <- 20
+  tickers <- character() 
+  for (i in seq(1,numberOfTickers,maxTickersInTable)) {
+    tickers <- append(tickers,
+                      StockScreenTickerList(i, url1, url2))
+  }
+  return(tickers)
+}
+```
+
+```{r runscreen, echo=F}
+url1<-"http://screener.finance.yahoo.com/b?vw=0&b="
+url2<-"&s=nm&pe=/15&pr=10/&mc=100000000/&dvy=0.1/&pb=/1.5&re=500000000/&db=stocks"
+numstks <- NumberOfStocksInScreen(url1,url2)
+tickers <- StockScreenTickers(numstks,url1,url2)
+#tickers
+```
+
+```{r error,echo=F}
+tryCatch.W.E <- function(expr)
+{
+    W <- NULL
+    w.handler <- function(w){ # warning handler
+	W <<- w
+	invokeRestart("muffleWarning")
+    }
+    list(value = withCallingHandlers(tryCatch(expr, error = function(e) e),
+				     warning = w.handler),
+	 warning = W)
+}
+```
+
+```{r profile, echo=F}
+Profile <- function(ticker = character()) {
+  url1 <- "http://finance.yahoo.com/q/pr?s="
+  url2 <- "+Profile"
+  tmp <- readHTMLTable(paste0(url1,ticker,url2), header=F,
+                       which=8, skip.rows = c(1),
+                       stringsAsFactors=F, as.data.frame = T)
+  profile <- data.frame(index = tmp[1,2],
+                        sector = tmp[2,2],
+                        industry = tmp[3,2],
+                        employees = tmp[4,2])
+  return(profile)
+}
+```
+
+```{r keystats,echo=F}
+KeyStats <- function(symbol) {
+  yahoo.URL <- "http://finance.yahoo.com/q/ks?s="
+  html_text <- htmlParse(paste(yahoo.URL, symbol, sep = ""), encoding="UTF-8")
+
+  #search for <td> nodes anywhere that have class 'yfnc_tablehead1'
+  nodes <- getNodeSet(html_text, "/*//td[@class='yfnc_tablehead1']")
+
+  if(length(nodes) > 0 ) {
+   measures <- sapply(nodes, xmlValue)
+
+   #Clean up the column name
+   measures <- gsub(" *[0-9]*:", "", gsub(" \\(.*?\\)[0-9]*:","", measures))   
+
+   #Remove dups
+   dups <- which(duplicated(measures))
+   #print(dups) 
+   for(i in 1:length(dups)) 
+     measures[dups[i]] = paste(measures[dups[i]], i, sep=" ")
+
+   #use siblings function to get value
+   values <- sapply(nodes, function(x)  xmlValue(getSibling(x)))
+
+   df <- data.frame(t(values))
+   colnames(df) <- measures
+   return(df)
+  } else {
+   return("error")
+  }
+}
+
+```
+
+```{r convert,echo=F}
+ConvertFactor <- function(fctr=factor()){
+  return(as.numeric(as.character(fctr)))
+}
+ConvertKMB <- function(kmb=factor()){
+  kmb.str <- as.character(kmb)
+  return(
+    unname(
+      c(B=1e9, M= 1e6, K= 1e3)[str_sub(kmb,start=-1)]
+    )* 
+      as.numeric(sub('[KMB]$', '', kmb))
+  )
+}
+ConvertComma <- function(comma=factor()){
+  comma.str <- as.character(comma)
+  # remove commas
+  return(as.numeric(gsub(',','',comma.str)))
+}
+```
+
+```{r output, echo = F, results='asis'}
+tickersToKeep <- character()
+pe <- numeric()
+fiveyravedivyld <- character()
+grahamnumber <- numeric()
+revenue <- numeric()
+revenuegrowth <- numeric()
+avgvol <- numeric()
+pbratio <- numeric()
+
+for (i in 1:length(tickers)) {
+#for (i in 1:100) {
+  #print(tickers[i])
+  keep = T
+  
+  tickerKeyStats <- KeyStats(tickers[i])
+  if(tickerKeyStats[1] == "error") {keep = F}
+  
+  #TODO:
+  #Long-term debt should not exceed the net current assets
+  # net current assets = total current assets(17) - total current liabilities
+    
+  if (keep) {
+    pe.ticker <- ConvertFactor(tickerKeyStats$`Trailing P/E`)
+    fiveyravedivyld.ticker <- as.character(
+      tickerKeyStats$`5 Year Average Dividend Yield`)
+    revenue.ticker <- ConvertKMB(tickerKeyStats$Revenue)
+    avgvol.ticker <- ConvertComma(tickerKeyStats$`Avg Vol`)
+    pbratio.ticker <- ConvertFactor(tickerKeyStats$`Price/Book`)
+    
+    if (is.na(pe.ticker) |
+        is.na(revenue.ticker) |
+        is.na(avgvol.ticker) |
+        is.na(pbratio.ticker)) {
+      keep <-F
+    }
+    
+    if (keep) {
+      if(pe.ticker > 15 |
+         fiveyravedivyld.ticker == "N/A" |
+         revenue.ticker < 500000000 | #revenue < 500M
+         avgvol.ticker < 500000 |
+         pbratio.ticker > 1.5 ) {
+        keep <- F
+      } else {
+        #print("passed first set of tests")
+      }
+    }
+  }
+  
+  if (keep) {
+    err <- tryCatch.W.E(s2 <- getFin(tickers[i],src="yahoo",auto.assign = F))
+    if (is.character(err$value$message)) {
+      keep = F
+    } else {
+      revenuegrowth.ticker <- s2$IS$A[3,1] - s2$IS$A[3,4]
+      
+      if(is.na(revenuegrowth.ticker) |
+         revenuegrowth.ticker < 0 #negative 4-yr revenue growth
+      ) {
+        keep <- F
+      } else {
+        #print("passed second set of tests")
+      }
+    }
+  }
+        
+  if (keep) {
+    err <- tryCatch.W.E(s1 <- getSymbols(tickers[i],src="yahoo",auto.assign = F))
+    if (!is.character(err$value$message)) {
+      
+      print(paste(getQuote(tickers[i], what=yahooQF("Name"))[,2]))
+      
+      print(xtable(Profile(tickers[i])),type='latex',comment=F) 
+      
+      barChart(s1, subset ='last 12 months',name = tickers[i],
+               TA="addVo();addSMA(n=200)")
+      
+      print('\newpage')
+      
+      tickersToKeep<-append(tickersToKeep,tickers[i])
+      pe<-append(pe,pe.ticker)
+      fiveyravedivyld<-
+        append(fiveyravedivyld,fiveyravedivyld.ticker)
+      # Graham number is sqrt(22.5*EPS*BVPS)
+      grahamnumber <- 
+        append(grahamnumber,
+               sqrt(22.5*
+                      ConvertFactor(tickerKeyStats$`Trailing P/E`)*
+                      ConvertFactor(tickerKeyStats$`Book Value Per Share`)
+               )
+        )
+      revenue <- append(revenue,revenue.ticker)
+      revenuegrowth <- append(revenuegrowth,revenuegrowth.ticker)
+      avgvol <- append(avgvol,avgvol.ticker)
+      pbratio <- append(pbratio,pbratio.ticker)
+    }
+  }
+}
+
+stockTable <- data.frame(ticker = tickersToKeep,
+                         pe = pe,
+                         fiveyravedivyld = fiveyravedivyld,
+                         gn = grahamnumber,
+                         revenue = revenue,
+                         revenuegrowth = revenuegrowth,
+                         avgvol = avgvol,
+                         pbratio = pbratio)
+
+```
+
+
+```{r table, echo=F, results='asis'}
+print(xtable(stockTable),type='latex',comment=F)
+```
